@@ -1,0 +1,233 @@
+################################################################
+# Shiny app by Joseph Uttecht
+# Nov 3 2024
+#
+# App can be used to look at many different reasons why accidents
+# occur and can also be filtered based on other important factors.
+################################################################
+
+# Load packages
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(readr)
+library(tidyr)
+library(shinythemes)
+
+# Read in data
+drugs <- read_csv("drugs.csv")
+factor <- read_csv("factor.csv")
+accident <- read_csv("accident.csv")
+distract <- read_csv("distract.csv")
+weather <- read_csv("weather.csv")
+
+# Define regions for each state
+northeast <- c("Maine", "New Hampshire", "Vermont", "Massachusetts", "Rhode Island", "Connecticut", "New York", "New Jersey", "Pennsylvania")
+midwest <- c("Ohio", "Indiana", "Illinois", "Michigan", "Wisconsin", "Minnesota", "Iowa", "Missouri", "North Dakota", "South Dakota", "Nebraska", "Kansas")
+south <- c("Delaware", "Maryland", "Virginia", "West Virginia", "Kentucky", "North Carolina", "South Carolina", "Georgia", "Florida", 
+           "Alabama", "Mississippi", "Tennessee", "Arkansas", "Louisiana", "Oklahoma", "Texas")
+west <- c("Montana", "Idaho", "Wyoming", "Colorado", "New Mexico", "Arizona", "Utah", "Nevada", "Washington", "Oregon", "California", "Alaska", "Hawaii")
+
+# Create main dataset
+accident_data <- accident %>%
+  select(ST_CASE, STATENAME, MONTHNAME, VE_TOTAL, DAY_WEEKNAME, ROUTENAME) %>%
+  rename(State = STATENAME, Month = MONTHNAME, Number_of_Vehicles = VE_TOTAL, Day = DAY_WEEKNAME, Route = ROUTENAME) %>%
+  mutate(
+    Month = factor(Month, levels = month.name),
+    Day = factor(Day, levels = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")),
+    Region = case_when(
+      State %in% northeast ~ "Northeast",
+      State %in% midwest ~ "Midwest",
+      State %in% south ~ "South",
+      State %in% west ~ "West",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Edit drug data
+drug_data <- drugs %>%
+  select(ST_CASE, DRUGRESNAME) %>%
+  rename(Drug = DRUGRESNAME) %>%
+  filter(Drug != "Test Not Given") %>%
+  filter(Drug != "Tested, No Drugs Found/Negative") %>%
+  filter(Drug != "Reported as Unknown if Tested for Drugs") %>%
+  filter(Drug != "Not Reported") %>%
+  group_by(Drug) %>%
+  filter(n() >= 500) %>%
+  ungroup()
+
+# Edit distraction data
+distraction_data <- distract %>%
+  select(ST_CASE, DRDISTRACTNAME) %>%
+  rename(Distraction = DRDISTRACTNAME) %>%
+  filter(Distraction != "Not Distracted") %>%
+  filter(Distraction != "Not Reported") %>%
+  filter(Distraction != "Reported as Unknown if Distracted")
+
+# Edit weather data
+weather_data <- weather %>%
+  select(ST_CASE, WEATHERNAME) %>%
+  rename(Weather = WEATHERNAME)
+
+# Merge datasets 
+Accident_Total <- accident_data %>%
+  left_join(drug_data, by = "ST_CASE") %>%
+  left_join(distraction_data, by = "ST_CASE") %>%
+  left_join(weather_data, by = "ST_CASE")
+
+Accident_Total$Number_of_Vehicles <- as.factor(Accident_Total$Number_of_Vehicles)
+
+# Define the UI
+ui <- fluidPage(
+  theme = shinythemes::shinytheme("united"),
+  titlePanel("Why do Accidents Happen?"),
+  
+  navbarPage("App",
+             tabPanel("Data Visualizer",
+                      sidebarLayout(
+                        sidebarPanel(
+                          selectInput("selected_var1", "Choose the primary variable to plot:", 
+                                      choices = c("State", "Month", "Day", "Region", "Route"), selected = "Month"),
+                          
+                          selectInput("selected_var2", "Choose a secondary variable to compare:", 
+                                      choices = c("Weather", "Distraction", "Drug", "Number_of_Vehicles"), selected = "Number_of_Vehicles"),
+                          
+                          uiOutput("filter_ui"),
+                          
+                          actionButton("reset", "Reset Filters")
+                        ),
+                        mainPanel(
+                          plotlyOutput("primary_plot"),  # Output for the first plot
+                          plotlyOutput("comparison_plot") # Output for the comparison plot
+                        )
+                      )
+             ),
+             tabPanel("Summary",
+                      sidebarLayout(
+                        sidebarPanel(
+                          selectInput("summary_var1", "Choose a variable for summary:", 
+                                      choices = c("State", "Month", "Day", "Region", "Route"), selected = "State")
+                        ),
+                        mainPanel(
+                          tableOutput("summary_table")  # Output for summary statistics
+                        )
+                      )
+             )
+  )
+)
+
+# Define the server logic
+server <- function(input, output, session) {
+  
+  output$filter_ui <- renderUI({
+    primary_var <- input$selected_var1
+    
+    if (primary_var %in% c("State", "Route", "Region")) {
+      choices <- unique(Accident_Total[[primary_var]])
+      selectInput("filter_choices", "Select Variables to Compare:", choices = choices, selected = NULL, multiple = TRUE, selectize = TRUE)
+    } else {
+      choices <- if (primary_var == "Month") {
+        month.name
+      } else {
+        c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+      }
+      selectInput("filter_choices", "Select Variables to Compare:", choices = choices, selected = NULL, multiple = TRUE, selectize = TRUE)
+    }
+  })
+  
+  # Reset filters
+  observeEvent(input$reset, {
+    updateSelectInput(session, "selected_var1", selected = "Month")
+    updateSelectInput(session, "selected_var2", selected = "Number_of_Vehicles")
+    updateSelectInput(session, "filter_choices", selected = NULL)
+  })
+  
+  # Create main histogram
+  output$primary_plot <- renderPlotly({
+    primary_var <- input$selected_var1
+    data <- Accident_Total
+    
+    if (!is.null(input$filter_choices) && length(input$filter_choices) > 0) {
+      data <- data %>% filter(get(primary_var) %in% input$filter_choices)
+    }
+    
+    if (is.numeric(data[[primary_var]])) {
+      plot_primary <- ggplot(data, aes_string(x = primary_var)) +
+        geom_histogram(fill = "#69b3a2", color = "#1f655d", bins = 30) +
+        labs(x = primary_var, y = "Count", title = paste("Distribution of", primary_var)) +
+        theme_minimal() +
+        theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+    } else {
+      plot_primary <- ggplot(data, aes_string(x = primary_var)) +
+        geom_bar(fill = "#FF6347", color = "black") +
+        labs(x = primary_var, y = "Count", title = paste("Count of", primary_var)) +
+        theme_minimal() +
+        theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+              axis.text.x = element_text(angle = 45, hjust = 1))
+    }
+    
+    ggplotly(plot_primary)
+  })
+  
+  # Create bubble chart
+  output$comparison_plot <- renderPlotly({
+    primary_var <- input$selected_var1
+    secondary_var <- input$selected_var2
+    data <- Accident_Total
+    
+    if (!is.null(input$filter_choices) && length(input$filter_choices) > 0) {
+      data <- data %>% filter(get(primary_var) %in% input$filter_choices)
+    }
+    
+    if (!is.numeric(data[[primary_var]]) && !is.numeric(data[[secondary_var]])) {
+      data_agg <- data %>%
+        count(get(primary_var), get(secondary_var)) %>%
+        rename(Count = n, Primary = `get(primary_var)`, Secondary = `get(secondary_var)`)
+      
+      plot_comparison <- ggplot(data_agg, aes(x = Primary, y = Secondary, size = Count)) +
+        geom_point(color = "#0073C2FF", alpha = 0.6) +
+        scale_size_continuous(range = c(3, 15)) +
+        labs(x = primary_var, y = secondary_var, title = paste("Bubble Chart of", primary_var, "vs", secondary_var),
+             size = "Count") +
+        theme_minimal() +
+        theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+              axis.text.x = element_text(angle = 45, hjust = 1))
+    } else {
+      plot_comparison <- ggplot(data, aes_string(x = primary_var, y = secondary_var, size = "Number_of_Vehicles")) +
+        geom_point(color = "#0073C2FF", alpha = 0.6) +
+        scale_size_continuous(range = c(3, 15)) +
+        labs(x = primary_var, y = secondary_var, title = paste("Bubble Chart of", primary_var, "vs", secondary_var),
+             size = "Number of Vehicles") +
+        theme_minimal() +
+        theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+    }
+    
+    ggplotly(plot_comparison)
+  })
+  
+  # Create summary table
+  output$summary_table <- renderTable({
+    summary_var <- input$summary_var1
+    data <- Accident_Total
+    
+    if (!is.null(input$filter_choices) && length(input$filter_choices) > 0) {
+      data <- data %>% filter(get(summary_var) %in% input$filter_choices)
+    }
+    
+    summary_data <- data %>%
+      group_by(!!sym(summary_var)) %>%  
+      summarise(
+        Count = n(),
+        Mean_Vehicles = mean(Number_of_Vehicles, na.rm = TRUE),
+        Proportion = n() / nrow(data)
+      ) %>%
+      rename(!!summary_var := !!sym(summary_var)) %>%  
+      arrange(desc(Count))
+    
+    summary_data
+  })
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
